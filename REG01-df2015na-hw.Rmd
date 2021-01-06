@@ -1,0 +1,1237 @@
+---
+title: "df2015na recipe"
+output: 
+  html_document:
+    fig_width: 7
+    fig_height: 5
+    fig_caption: true
+    theme: yeti
+    highlight: kate
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    #number_sections: true
+    #df_print: paged
+    #code_folding: show
+---
+```{r}
+time1 <- Sys.time()
+time1
+```
+
+# 자료설명 
+* Size Korea 2015년 인체계측자료 일부: n=300 (nc=269), d=13
+
+변수|설명          
+----|------------
+gnd | 성별{F, M}. 이진 판별분석시 타겟  
+age | 나이 
+ht  | 키 (cm). 회귀분석시 타겟
+wt  | 몸무게 (kg)
+wa  | 허리둘레(cm) 
+hdln| 손길이(cm)
+hdwd| 손너비(cm)
+ftln| 발길이(cm)
+ftwd| 발너비(cm)
+bld | 혈액형{A,AB,B,O}
+lft | 왼손잡이용 가변수 (1,0) 
+smk | 흡연 여부 (1,0)
+alc | 음주 여부 (1,0)
+
+* [Model Lookup](https://topepo.github.io/caret/available-models.html)
+* install.packages("caret", dependencies = c("Depends", "Suggests"))
+
+## 참고 사이트: 
+* [RStudio Cheat Sheets](https://rstudio.com/resources/cheatsheets/): 최신 치트시트 
+* [Data Visualization Cheat Sheet](https://github.com/rstudio/cheatsheets/raw/master/data-visualization-2.1.pdf)
+* [Data Transformation Cheat Sheet](https://github.com/rstudio/cheatsheets/raw/master/data-transformation.pdf)
+* [ggplot2 사이트](http://docs.ggplot2.org/current/)
+
+
+
+# 패키지 
+
+```{r}
+library(caret)
+library(GGally)
+library(elasticnet)
+library(rpart.plot)
+library(xgboost)
+library(glmnet)
+suppressWarnings(suppressMessages(library(tidyverse)))
+library(gridExtra) # grid.arrange(, nrow, ncol)
+library(scales)    # scale_x_xxx
+library(naniar)
+library(tidymodels)
+```
+
+# 읽기
+
+```{r}
+# as.data.frame으로 안바꾸면 caret vs tidyverse 호환문제 때문에 많은 경고문 발생 
+# as.data.frame 해도 문자변수를 factor화 하지 않음 
+DF <- as.data.frame(read_csv('/Users/jongeun/Documents/data_mining/df2015na.csv'))
+dim(DF)
+sapply(DF, class)
+head(DF)
+```
+
+
+# 결측
+* 결측 현황: naniar
+```{r}
+# 변수별 결측비율, Missing=결측셀비율, Present=비결측셀비율 
+naniar::vis_miss(DF) 
+naniar::miss_var_summary(DF)
+
+# 비결측셀 비율 = 비결측셀 수/셀수 = n. 셀수= n*d 
+100*sum(!is.na(DF))/(nrow(DF)*ncol(DF)) 
+100*n_complete(DF)/(nrow(DF)*ncol(DF))  
+100*prop_complete(DF)
+
+# 결측셀 비율 = 결측셀/셀수
+100*sum(is.na(DF))/(nrow(DF)*ncol(DF))  # 결측비율 
+100*n_miss(DF)/(nrow(DF)*ncol(DF))      # 결측비율 
+100*prop_miss(DF)
+
+# 완전한 관측값 비율=완전한 관측값/n
+sum(complete.cases(DF))/nrow(DF)*100  # prop_complete_case(DF)
+```
+
+* 결측 현황(표본추출): 원자료가 많으면 랜덤 추출해서 파악 권장
+
+```{r}
+DF %>% sample_n(200) %>% vis_miss()
+DF %>% sample_n(200) %>% miss_var_summary()
+```
+
+
+# 전처리 
+* 문자변수(gnd, 를 factor화
+* {0,1}로 코딩 가변수는 그대로 숫자형으로 사용. factor화해도 무방 
+```{r}
+# factor로 다 바꿀 것. lm, rpart, rf은 안해도 무방, gbm에서 오류남
+DF <- mutate(DF, gnd=factor(gnd), bld=factor(bld))
+sapply(DF, class)
+```
+* 참고: 가변수코딩된 이진변수
+    * 일반적으로 R에서는 문제 안됨.
+    
+
+# 탐색 
+## 단변량 탐색 
+
+```{r}
+summary(DF)
+# summarize_if(.tbl, .predicate:logical, .funs:list, ...)
+# summarize_at(,tbl, .vars:vector. .funs:list, ...)
+summarize_if(DF, is.numeric, list(mn=mean, sd=sd), na.rm=TRUE)
+summarize_at(DF, c('ht','wt'), list(mn=mean, sd=sd), na.rm=TRUE)
+```
+
+```{r}
+g1 <- ggplot(DF, aes(x=ht)) + geom_density() + geom_rug()
+g2 <- ggplot(DF, aes(x=ht)) + geom_histogram(color='black', fill='white')
+
+g3 <- ggplot(DF, aes(x=ht)) + 
+       geom_histogram(aes(y=..density..), color='black', fill='white') +
+       geom_density(alpha=0.2, fill='#FF6666') + 
+       geom_rug()
+g4 <- ggplot(DF, aes(x=ht)) + geom_boxplot() 
+grid.arrange(g1, g2, g3, g4, nrow=2, ncol=2)
+
+g1 <- ggplot(DF, aes(x=gnd)) + geom_bar()
+g2 <- ggplot(DF, aes(x=gnd)) + 
+        geom_bar(aes(y=..count../sum(..count..))) +
+        scale_y_continuous(labels=percent)
+g3 <- ggplot(DF, aes(x=smk)) + geom_bar()
+g4 <- ggplot(DF, aes(x=smk)) + 
+        geom_bar(aes(y=..count../sum(..count..))) +
+        scale_y_continuous(labels=percent)
+grid.arrange(g1, g2, g3, g4, nrow=2, ncol=2)
+```
+
+## 이변량 탐색
+###  연속 ~ 이산 
+```{r}
+DF %>% 
+  group_by(gnd) %>% 
+  summarize_at(c('ht','wt'), list(mn=mean, sd=sd), na.rm=TRUE)
+
+DF %>% 
+  group_by(gnd) %>% 
+  summarize_if(is.numeric, list(mn=mean, sd=sd), na.rm=TRUE)
+#[이 노래가 어디 나오는 노래인지 맞춰 볼 것, 가사도 구해서 구글번역할 것. 선착순 3명](https://www.youtube.com/watch?v=KH71jKtljPE)
+
+
+g1 <- ggplot(DF, aes(x=ht, col=gnd, fill=gnd)) + geom_density(alpha=0.5)
+g2 <- ggplot(DF, aes(x=ht, col=gnd, fill=gnd)) + geom_histogram(alpha=0.5)
+g3 <- ggplot(DF, aes(x=ht)) + geom_histogram() + facet_grid(gnd~.)
+g4 <- ggplot(DF, aes(x=gnd, y=ht)) + geom_boxplot() + coord_flip()
+grid.arrange(g1, g2, g3, g4, nrow=2, ncol=2)
+```
+```{r}
+t.test(ht~gnd, data=DF, var.equal=TRUE)
+summary(aov(ht~bld, data=DF))
+```
+```{r}
+R <- cor(DF[,sapply(DF, is.numeric)], use='pairwise.complete.obs')
+R
+sort(R['ht',], decreasing=TRUE)
+
+g1 <- ggplot(DF, aes(x=ftln, y=ht)) + geom_point(alpha=0.5)
+g2 <- ggplot(DF, aes(x=ftln, y=ht, color=gnd, shape=gnd)) + geom_point(alpha=0.5)
+g3 <- ggplot(DF, aes(x=smk, y=ht, color=gnd, shape=gnd)) + geom_point(alpha=0.5)
+g4 <- ggplot(DF, aes(x=smk, y=ht, color=gnd, shape=gnd)) + geom_jitter(alpha=0.5)
+grid.arrange(g1, g2, g3, g4, nrow=2, ncol=2)
+
+library(GGally) # ggcorr, ggparis
+ggcorr(DF[,sapply(DF, is.numeric)], 
+       geom = 'tile',                # nbreaks=9, palette='RdYlGn',
+       label=TRUE)
+
+ggpairs(DF, 
+        columns=c('ht','ftln','hdln','ftwd','hdwd', 'wt'),
+        lower=list(continuous=wrap('points', alpha=0.05, col='blue')),
+        diag=list(continuous='barDiag'))   # diag=list(continous='densityDiag')
+
+ggplot(DF, aes(x=wt, y=ht))+ geom_density2d() + geom_point(aes(col=gnd, shape=gnd))
+```
+             
+### 이산 ~ 이산
+
+```{r}
+g1 <- ggplot(DF, aes(x=smk, fill=gnd)) + geom_bar()
+g2 <- ggplot(DF, aes(x=smk, fill=gnd)) + geom_bar(aes(y=..count../sum(..count..)))
+
+# Or
+tb <- table(DF$gnd, DF$smk)
+tb <- xtabs(~smk+gnd, data=DF)
+df <- data.frame(tb)
+df
+g3 <- ggplot(df, aes(x=gnd, y=Freq)) + geom_bar(aes(fill=smk), stat='identity')
+
+
+tb <- prop.table(xtabs(~gnd+smk, data=DF),1)
+tb
+df <- data.frame(tb)
+df
+g4 <- ggplot(df, aes(x=gnd, y=Freq)) + geom_bar(aes(fill=smk), stat='identity')
+
+grid.arrange(g1, g2, g3, g4, nrow=2, ncol=2)
+```
+
+```
+chisq.test(xtabs(~gnd+smk, data=DF), correct=FALSE)
+```
+
+# 분할 
+
+* rsample::initial_split()으로 trn/tst 분할
+* training(), testing()으로 데이터프레임 추출
+```{r}
+set.seed(0205)
+isp <- rsample::initial_split(DF, prop = 2/3)
+trn <- as.data.frame(training(isp))
+tst <- as.data.frame(testing(isp))
+trny <- trn$ht
+tsty <- trn$ht
+
+# 완전한 관측치 비율 확인
+sapply(trn, function(x) mean(!is.na(x)))
+```
+
+
+
+# 전처리
+## 방법2: trn/tst 생성없이 recipe생성
+* [권장순서](http://www.rebeccabarter.com/blog/2019-06-06_pre_processing/): impute, transformation(symmetry), discretize, dummy, interaction, center/scale/range, multivariateTrnasformation(PCA, spatialSign). 가변수후 표준화??.
+* [Should you ever standardise binary variables?](https://stats.stackexchange.com/questions/59392/should-you-ever-standardise-binary-variables)
+      * Pampel, Logistic regression:A primer (standardizing dummy variable) p32
+      * 가변수의 표준화: {0,1}을 {-p/sqrt(pq), q/sqrt(pq)}로 여전히 이진값을 가짐
+      * 모형 해석면에서 가변수 표준화 비추천, 예측모형 적합안정성(특히 신경망계통)면에서는 사용가능  
+
+
+* 예
+
+```
+RC <- recipe(y~., data=trn) %>% 
+  step_nzv(all_predictors()) %>%  
+  step_corr(all_predictors(), threshold = 0)%>%
+  step_YeoJohnson(all_predictors()) %>%     
+  step_interact(~ nbasic:rotatablebonds) %>%
+  step_center(all_predictors()) %>%  
+  step_scale(all_predictors()) %>%   
+  step_pca(all_predictors(), num = 3)
+  
+RC <- prep(RC, training = trn)
+bake(RC, tst)
+```
+```{r}
+RC <- 
+  trn %>%
+  recipe(ht~.)%>%
+  step_bagimpute(-all_outcomes()) %>%
+  step_dummy(all_nominal(), -all_outcomes())
+RC
+```
+     
+
+# trainControl: 타당성 검정 계획 
+* method='boot|cv|repeatedcv|LOOCV|none'
+```{r}
+trCtrl <- caret::trainControl(method='cv', number=10, verboseIter=FALSE)
+```
+* 튜닝방법 0: 지정하지 않으면 
+    * trainControl(search='grid'), train(tuneLength=3)으로 처리됨(탐색 불완전) 
+* 튜닝방법 1: 사용자가 초모수값을 지정
+    * trainControl(search='grid'), train(tuneGrid:data.frame)
+    * 튜닝할 초모수가 적을 때 적합(대부분의 모형은 평균 2개의 초모수를 가짐)
+    * 단점: 초모수값을 정하기가 어려움 
+* 튜닝방법 2: 초모수값에 대한 그리드를 자동생성 
+    * trainControl(search='grid'), train(tuneLength=10)
+    * 튜닝할 초모수가 적을 때 적합. 
+    * 예: 초모수가 3개이고 tuneLength=10이면 초모수별로 10개의 값(caret이 자동으로 정함), 즉 총 10x10x10개의 조합을 탐색함. 
+    * 장점: 적절한 초모수값의 범위 탐색가능하므로 초기 탐색에 유용  
+* 튜닝방법 3: 
+    * trainControl(search='random'), train(tuneLength=10)  
+    * 튜닝할 초모수가 많을 때 적합(예:신경망 계통 모형)
+
+
+# 모형적합
+
+* tuneLength는 다른 모수와 같이 사용 못함 
+
+## lm
+* lm은 다른 회귀모형을 평가할 때 기준 모형(baseline)으로 사용됨: 튜닝모수가 없음. 
+
+모수     |역할(기본값)|참고
+---------|------------|------------------------------------
+intercept|Intercept (default=TRUE) 절편|튜닝 안함 
+```{r}
+caret::modelLookup('lm')
+```
+
+
+* 예측값, 잔차 저장 및 성능측도 
+```{r}
+set.seed(0205)
+Mlm <- caret::train(RC, data=trn, method='lm',
+             trControl=trCtrl)
+Mlm
+```
+```{r}
+Mlm$bestTune
+```
+```{r}
+Mlm$finalModel
+```
+```{r}
+summary(Mlm$finalModel)
+```
+```{r}
+caret::varImp(Mlm)
+```
+```{r}
+g2 <- ggplot(caret::varImp(Mlm))
+Mlm$resample
+```
+```{r}
+g3 <- densityplot(Mlm)
+grid.arrange(g2,g3)
+```
+* 예측값, 잔차 저장 및 성능측도
+```{r}
+TRNOUT <- data.frame(y=trn$ht)
+TRNOUT <- mutate(TRNOUT,
+                 yhlm = predict(Mlm, newdata = trn),
+                 reslm = y-yhlm)
+head(TRNOUT)
+```
+```{r}
+sqrt(mean(TRNOUT$reslm^2))   #RMSE
+```
+```{r}
+cor(TRNOUT$y, TRNOUT$yhlm)^2
+```
+```{r}
+TSTOUT <- data.frame(y=tst$ht)
+TSTOUT <- mutate(TSTOUT,
+                 yhlm = predict(Mlm, newdata = tst),
+                 reslm = y-yhlm)
+head(TSTOUT)
+```
+```{r}
+sqrt(mean(TSTOUT$reslm^2))
+```
+```{r}
+cor(TSTOUT$y, TSTOUT$yhlm)^2
+```
+```{r}
+p1 <- xyplot(y~yhlm, data=TRNOUT, type=c('g','p'), main='TRNOUT')
+p2 <- xyplot(reslm~yhlm, data=TRNOUT, main='TRNOUT')
+p3 <- xyplot(y~yhlm, data=TSTOUT, main='TSTOUT')
+p4 <- xyplot(reslm~yhlm, data=TSTOUT, main='TSTOUT')
+grid.arrange(p1,p2,p3,p4, nrow=2, ncol=2)
+```
+## lmStepAIC, glmStepAIC 
+* MASS::stepAIC를 이용한 변수선택 
+```{r}
+caret::modelLookup('lmStepAIC')
+```
+```{r}
+set.seed(0205)
+Mstep <- caret::train(RC, data=trn, method='lmStepAIC',
+                      trControl=trCtrl,
+                      direction='backward')
+```
+
+```{r}
+Mstep
+```
+```{r}
+Mstep$bestTune
+```
+```{r}
+Mstep$finalModel
+```
+```{r}
+summary(Mstep$finalModel)
+```
+```{r}
+caret::varImp(Mstep)
+```
+```{r}
+g2 <- ggplot(varImp(Mstep))
+Mstep$resample
+```
+```{r}
+g3 <- densityplot(Mstep)
+grid.arrange(g2,g3)
+```
+
+* 예측값, 잔차 저장 및 성능측도 
+```{r}
+TRNOUT <- mutate(TRNOUT,
+                 yhstep=predict(Mstep, newdata = trn),
+                 resstep=y-yhstep)
+head(TRNOUT)
+```
+```{r}
+sqrt(mean(TRNOUT$resstep^2))
+```
+```{r}
+cor(TRNOUT$y, TRNOUT$yhstep)^2
+```
+```{r}
+TSTOUT <- mutate(TSTOUT,
+                 yhstep=predict(Mstep, newdata = tst),
+                 resstep=y-yhstep)
+head(TSTOUT)
+```
+```{r}
+sqrt(mean(TSTOUT$resstep^2))
+```
+```{r}
+cor(TSTOUT$y, TSTOUT$yhstep)^2
+```
+```{r}
+g1 <- ggplot(TRNOUT, aes(x=yhstep, y=y)) +
+  geom_point(alpha=0.5) +
+  geom_abline(intercept = 0, slope = 1, linetype=2)+
+  ggtitle('TRNOUT')
+g2 <- ggplot(TRNOUT, aes(x=yhstep, y=reslm))+
+               geom_point(alpha=0.5)+
+               geom_hline(yintercept = 0, linetype=2)+
+               ggtitle('TRNOUT')
+g3 <- ggplot(TSTOUT, aes(x=yhstep, y=y))+
+  geom_point(alpha=0.5)+
+  geom_abline(intercept = 0, slope = 1, linetype=2)+
+  ggtitle('TSTOUT')
+g4 <- ggplot(TSTOUT, aes(x=yhstep, y=reslm))+
+               geom_point(alpha=0.5)+
+               geom_hline(yintercept = 0, linetype=2)+
+               ggtitle('TSTOUT')
+grid.arrange(g1,g2,g3,g4, nrow=2, ncol=2)
+```
+
+
+
+
+## elasticnet 
+
+* L1 벌점 회귀 
+   * glmnet::glmnet(alpha=1, lambda:regularization)
+   * elasticnet::lasso(lambda=0, fraction:Fraction)
+* L2 벌점 회귀 
+   * glmnet::glmnet(alpha=0, lambda:regularization)
+   * elasticnet::ridge(lambda=1, fraction)
+* ElasticNet
+   * glmnet::glmnet(alpha, lambda)
+   * elasticnet::enet(lambda, fraction)
+
+
+### elasticnet::enet
+
+* elasticnet::enet
+* enet 목적함수 (lambda1=lambda임)
+
+$$ \sum_{i=1}^N (y_i-\eta_i)^2 + \lambda_1 \sum_{j=1}^p \beta_j^2 + \lambda_2 \sum_{j=1}^p |\beta_j| $$
+
+모수    |역할(기본값)|참고
+-------|---------|------------------------------------
+**fraction** |Fraction of Full Solution|&nbsp;
+**lambda**|Weight Decay, L2 벌점 계수|lambda=0이면 lasso에 해당 (glmnet의 lambda와 다름)
+```{r}
+library(elasticnet)
+```
+```{r}
+modelLookup('enet')
+```
+```{r}
+set.seed(0205)
+Menet <- train(RC, data=trn, method='enet', trControl = trCtrl,
+               tuneLength = 10)
+Menet
+```
+
+```{r}
+g1 <- ggplot(Menet)
+g1
+```
+
+```{r}
+Menet$bestTune
+```
+
+```{r}
+plot(Menet$finalModel)
+```
+
+```{r}
+Menet$finalModel
+```
+
+```{r}
+varImp(Menet)
+```
+
+```{r}
+g2 <- ggplot(varImp(Menet))
+Menet$resample
+```
+
+```{r}
+g3 <- densityplot(Menet)
+grid.arrange(g2,g3)
+```
+
+
+* 예측값, 잔차 저장 및 성능측도
+```{r}
+TRNOUT <- mutate(TRNOUT,
+                 yhenet = predict(Menet,newdata = trn),
+                 resenet=y-yhenet)
+```
+
+```{r}
+sqrt(mean(TRNOUT$resenet^2))
+```
+```{r}
+cor(TRNOUT$y, TRNOUT$yhenet)^2
+```
+```{r}
+TSTOUT <- mutate(TSTOUT,
+                 yhenet=predict(Menet, newdata = tst), resenet=y-yhenet)
+head(TSTOUT)
+```
+```{r}
+sqrt(mean(TSTOUT$resenet^2))
+```
+```{r}
+cor(TSTOUT$y, TSTOUT$yhenet)^2
+```
+```{r}
+p1 <- xyplot(y~yhenet, data=TRNOUT, type=c('g','p'), main='TRNOUT')
+p2 <- xyplot(resenet~yhenet, data=TRNOUT, main='TRNOUT')
+p3 <- xyplot(y~yhenet, data=TSTOUT, type=c('g','p'), main='TSTOUT')
+p4 <- xyplot(resenet~yhenet, data=TSTOUT, main='TSTOUT')
+grid.arrange(p1,p2,p3,p4,nrow=2,ncol=2)
+```
+### glmnet::glmnet 
+
+* glmnet: nlambda=100개를 사전 탐색한 후 lambda를 정함 
+* glmnet 목적함수 
+
+$$ \frac{1}{N} \sum_{i=1}^N (y_i-\eta_i)^2 + \lambda\{(1-\alpha) ||\beta||_2^2 + \alpha ||\beta||_1\} $$
+
+
+모수    |역할(기본값)|참고
+-------|---------|------------------------------------
+**alpha** |Mixing Percentage L1 비중|alpha=1(lasso), alpha=0(ridge), (0~1)면 elasticnet
+**lambda**|Regularization parameter L1 벌점 계수|클수록 회귀계수를 축소시킴(보수적)
+
+```{r}
+modelLookup('glmnet')
+```
+
+```{r}
+set.seed(0205)
+Mglmnet <- train(RC, data=trn, method = 'glmnet', trControl = trCtrl, tuneLength = 10)
+```
+
+```{r}
+Mglmnet
+```
+
+```{r}
+g1 <- ggplot(Mglmnet)
+g1
+```
+
+```{r}
+Mglmnet$bestTune
+```
+
+```{r}
+plot(Mglmnet$finalModel, label=TRUE)
+```
+
+```{r}
+coef(Mglmnet$finalModel, s=Mglmnet$finalModel$lambda0pt)
+
+```
+
+```{r}
+caret::varImp(Mglmnet)
+```
+
+```{r}
+g2 <- ggplot(varImp(Mglmnet))
+Mglmnet$resample
+```
+
+```{r}
+g3 <- densityplot(Mglmnet)
+grid.arrange(g2,g3)
+```
+* 예측값, 잔차 저장 및 성능측도
+```{r}
+TRNOUT <- mutate(TRNOUT,
+                 yhglmnet=predict(Mglmnet, newdata = trn), resglmnet=y-yhglmnet)
+head(TRNOUT)
+```
+```{r}
+sqrt(mean(TRNOUT$resglmnet^2))
+```
+```{r}
+cor(TRNOUT$y, TRNOUT$yhglmnet)^2
+```
+```{r}
+TSTOUT <- mutate(TSTOUT,
+                 yhglmnet=predict(Mglmnet, newdata = tst),resglmnet=y-yhglmnet)
+head(TSTOUT)
+```
+```{r}
+sqrt(mean(TSTOUT$resglmnet^2))
+```
+```{r}
+cor(TSTOUT$y, TSTOUT$yhglmnet)^2
+```
+```{r}
+p1 <- xyplot(y~yhglmnet, data=TRNOUT, type=c('g','p'),main='TRNOUT')
+p2 <- xyplot(resglmnet~yhglmnet, data=TRNOUT, main='TRNOUT')
+p3 <- xyplot(y~yhglmnet, data=TSTOUT)
+p4 <- xyplot(resglmnet~yhglmnet, data=TSTOUT, main='TSTOUT')
+grid.arrange(p1,p2,p3,p4,nrow=2,ncol=2)
+```
+
+
+## nnet 
+* nnet: 은닉층이 1개인 MLP 
+    * 회귀(linout=TRUE), 이진판별(entropy=TRUE), 다진판별(softmax=TRUE)
+    * 규제화: decay. 단 입력이 [0,1]로 범위정규화 되어 있어야 적용가능.회귀면 0.004~0.02(linout=T, 회귀), 0.01~0.1(entropy=T, 이진판별)
+
+모수    |역할(기본값)|참고
+-------|---------|------------------------------------
+**size**|no(Hidden Units) 은닉층내 노드수|&nbsp;
+**decay**| Weight decay L2 벌점계수| 입력을 [0, 1]로 범위정규화했을 때 적용가능 
+
+
+
+* 사용시 유의사항
+    * nnet: 은닉층 1개만 가능. decay는 입력을 [0,1]정규화 해야함. 상대적으로 안정적으로 수렴함
+    * neuralnet: 다층 MLP 가능. decay 사용불가. 요인처리불가. 입력을 [0,1]정규화 권장. 수렴안할 때 많으므로 반드시 예측값을 확인할 것.
+    * avNNet: 다수의 nnet을 결합하는 ensemble이므로 초기값 문제는 어느 정도 해결. nnet이 은닉층 1개만 허용하므로 MLP의 장점인 모형 유연성은 기대하기 힘듦
+    * 권장: Deep Learning하려면 nnet이나 neuralnet보다 keras를 사용할 것.
+
+```{r}
+modelLookup('nnet')
+```
+```{r}
+set.seed(0205)
+nnGrid <- expand.grid(
+  size=c(0,1,5,10),
+  decay=seq(0,1,by=0.1))
+Mnnet <- train(RC, data=trn, method='nnet', trControl = trCtrl,
+              tuneLength = 5, 
+              linout=TRUE,
+              skip=TRUE,
+              maxiter=1000,
+              trace=FALSE)
+Mnnet
+```
+```{r}
+g1 <- ggplot(Mnnet)
+g1
+```
+
+```{r}
+Mnnet$bestTune
+```
+
+```{r}
+Mnnet$finalModel
+```
+
+```{r}
+summary(Mnnet$finalModel)
+```
+
+```{r}
+varImp(Mnnet)
+```
+
+```{r}
+g2 <- ggplot(varImp(Mnnet))
+Mnnet$resample
+```
+
+```{r}
+g3 <- densityplot(Mnnet)
+grid.arrange(g1,g2,g3, nrow=2, ncol=2)
+```
+
+* 예측값, 잔차 저장 및 성능측도 
+```{r}
+TRNOUT <- mutate(TRNOUT,
+                 yhnnet=predict(Mnnet, newdata=trn),
+                 resnnet= y-yhnnet)
+head(TRNOUT)
+```
+
+```{r}
+sqrt(mean(TRNOUT$resnnet^2))
+```
+
+```{r}
+cor(TRNOUT$y, TRNOUT$yhnnet)
+```
+
+```{r}
+TSTOUT <- mutate(TSTOUT, yhnnet=predict(Mnnet, newdata=tst),
+                 resnnet=y-yhnnet)
+head(TSTOUT)
+```
+
+```{r}
+sqrt(mean(TSTOUT$resnnet^2))
+```
+
+```{r}
+cor(TSTOUT$y, TSTOUT$yhnnet)
+```
+
+```{r}
+g1 <- ggplot(TRNOUT, aes(x=yhnnet, y=y)) +
+  geom_point(alpha=0.5) +
+  geom_abline(intercept = 0, slope = 1, linetype=2)+
+  ggtitle('TRNOUT')
+g2 <- ggplot(TRNOUT, aes(x=yhnnet, y=reslm))+
+  geom_point(alpha=0.5)+
+  geom_hline(yintercept = 0, linetype=2)+
+  ggtitle('TRNOUT')
+g3 <- ggplot(TSTOUT, aes(x=yhnnet, y=y))+
+  geom_point(alpha=0.5)+
+  geom_abline(intercept = 0, slope = 1, linetype=2)+
+  ggtitle('TSTOUT')
+g4 <- ggplot(TSTOUT, aes(x=yhstep, y=reslm))+
+               geom_point(alpha=0.5)+
+               geom_hline(yintercept = 0, linetype=2)+
+               ggtitle('TSTOUT')
+grid.arrange(g1,g2,g3,g4, nrow=2, ncol=2)
+```
+
+## svmRadial 
+* svmRadial: kernlab의 ksvm
+    * 타겟이 factor가 아니면 기본값 type='eps-svr'. type='nu-svr'로 변경가능
+    * 타겟이 factor면 기본값 type='C-svc'
+    
+모수  |역할(기본값)|참고
+-----|---------|------------------------------------
+**C**|Cost|&nbsp;
+sigma|sigma|tuneLength 사용시 자동 튜닝에서 제외 
+```{r}
+modelLookup('svmRadial')
+```
+```{r}
+set.seed(0205)
+svmGrid <- expand.grid(
+  sigma=2^(-2:2),
+  C=2^(-2:2))
+MsvmRadial <- train(RC, data=trn, method='svmRadial', trControl = trCtrl, tuneLength = 10)
+```
+
+```{r}
+g1 <- ggplot(MsvmRadial)
+g1
+```
+
+```{r}
+MsvmRadial$bestTune
+```
+
+```{r}
+MsvmRadial$finalModel
+```
+
+```{r}
+summary(MsvmRadial$finalModel)
+```
+
+```{r}
+varImp(MsvmRadial)
+```
+
+```{r}
+g2 <- ggplot(varImp(MsvmRadial))
+MsvmRadial$resample
+```
+
+```{r}
+g3 <- densityplot(MsvmRadial)
+grid.arrange(g1,g2,g3,nrow=2,ncol=2)
+```
+* 예측값, 잔차 저장 및 성능측도 
+```{r}
+TRNOUT <- mutate(TRNOUT, 
+                 yhsvmRadial = predict(MsvmRadial, newdata = trn),ressvmRadial=y-yhsvmRadial)
+head(TRNOUT)
+```
+```{r}
+sqrt(mean(TRNOUT$ressvmRadial^2))
+```
+
+```{r}
+cor(TRNOUT$y, TRNOUT$yhsvmRadial)^2
+```
+
+```{r}
+TSTOUT <- mutate(TSTOUT,
+                 yhsvmRadial=predict(MsvmRadial, newdata=tst), ressvmRadial=y-yhsvmRadial)
+head(TSTOUT)
+```
+
+```{r}
+sqrt(mean(TSTOUT$ressvmRadial^2))
+```
+
+```{r}
+cor(TSTOUT$y, TSTOUT$yhsvmRadial)^2
+```
+```{r}
+g1 <- ggplot(TRNOUT, aes(x=yhsvmRadial, y=y)) +
+  geom_point(alpha=0.5) +
+  geom_abline(intercept = 0, slope = 1, linetype=2)+
+  ggtitle('TRNOUT')
+g2 <- ggplot(TRNOUT, aes(x=yhsvmRadial, y=reslm))+
+               geom_point(alpha=0.5)+
+               geom_hline(yintercept = 0, linetype=2)+
+               ggtitle('TRNOUT')
+g3 <- ggplot(TSTOUT, aes(x=yhsvmRadial, y=y))+
+  geom_point(alpha=0.5)+
+  geom_abline(intercept = 0, slope = 1, linetype=2)+
+  ggtitle('TSTOUT')
+g4 <- ggplot(TSTOUT, aes(x=yhsvmRadial, y=reslm))+
+               geom_point(alpha=0.5)+
+               geom_hline(yintercept = 0, linetype=2)+
+               ggtitle('TSTOUT')
+grid.arrange(g1,g2,g3,g4, nrow=2, ncol=2)
+```
+
+## rpart 
+* rpart (회귀나무) 
+
+
+모수    |역할(기본값)|참고
+--------|------------|------------------------------------
+**cp**  |Complexity Parameter(0.01) 단계별 학습 가중치|cp값 이하로 적합도개선하는 가지 제거
+```{r}
+modelLookup('rpart')
+```
+```{r}
+set.seed(0205)
+Mrpart <- train(RC, data=trn, method = 'rpart', trControl = trCtrl,
+                tuneLength = 10)
+```
+
+```{r}
+Mrpart
+```
+
+```{r}
+g1 <- ggplot(Mrpart)
+```
+
+```{r}
+Mrpart$finalModel
+```
+
+```{r}
+library(rpart.plot)
+rpart.plot::rpart.plot(Mrpart$finalModel)
+```
+```{r}
+varImp(Mrpart)
+```
+```{r}
+g2 <- ggplot(varImp(Mrpart))
+Mrpart$resample
+```
+```{r}
+g3 <- densityplot(Mrpart)
+grid.arrange(g1,g2,g3,nrow=2,ncol=2)
+```
+
+
+* 예측값, 잔차 저장 및 성능측도 
+```{r}
+TRNOUT <- mutate(TRNOUT,
+                 yhrpart=predict(Mrpart, newdata=trn),
+                 resrpart= y-yhrpart)
+head(TRNOUT)
+```
+```{r}
+sqrt(mean(TRNOUT$resrpart^2))
+```
+```{r}
+cor(TRNOUT$y, TRNOUT$yhrpart)^2
+```
+```{r}
+TSTOUT <- mutate(TSTOUT,
+                 yhrpart=predict(Mrpart,newdata=tst),
+                 resrpart=y-yhrpart)
+head(TSTOUT)
+```
+```{r}
+sqrt(mean(TSTOUT$resrpart^2))
+```
+```{r}
+cor(TSTOUT$y, TSTOUT$yhrpart)^2
+```
+```{r}
+p1 <- xyplot(y~yhrpart, data=TRNOUT,type=c('g','p'),main='TRNOUT')
+p2 <- xyplot(resrpart~yhrpart, data=TRNOUT, main='TRNOUT')
+p3 <- xyplot(y~yhrpart, data=TSTOUT,type=c('g','p'),main='TSTOUT')
+p4 <- xyplot(resrpart~yhrpart, data=TSTOUT, main='TSTOUT')
+grid.arrange(p1,p2,p3,p4,nrow=2,ncol=2)
+```
+
+## ranger 
+* ranger: fast random forest 
+
+모수    |역할(기본값)|참고
+--------|------------|------------------------------------
+**mtry**|no(Randomly Selected Predictors) |나무생성용 추출된 입력변수
+**splitrule**|Splitting rule {variance, extratrees}|&nbsp;
+**min.node.size**|Min Node Size (5)|&nbsp;
+```{r}
+modelLookup('ranger')
+```
+```{r}
+set.seed(0205)
+Mranger <- train(RC, data=trn, method = 'ranger', trControl = trCtrl, tuneLength = 10, importance='impurity')
+```
+
+```{r}
+Mranger
+```
+
+```{r}
+g1 <- ggplot(Mranger)
+g1
+```
+
+```{r}
+Mranger$bestTune
+```
+
+```{r}
+Mranger$finalModel
+```
+
+```{r}
+g2 <- ggplot(varImp(Mranger))
+Mranger$resample
+```
+
+```{r}
+g3 <- densityplot(Mranger)
+grid.arrange(g1,g2,g3,nrow=2, ncol=2)
+```
+
+* 예측값, 잔차 저장 및 성능측도 
+```{r}
+TRNOUT <- mutate(TRNOUT,
+                 yhranger=predict(Mranger, newdata=trn), resranger=y-yhranger)
+head(TRNOUT)
+```
+
+```{r}
+sqrt(mean(TRNOUT$resranger^2))
+```
+
+```{r}
+cor(TRNOUT$y, TRNOUT$yhranger)^2
+```
+
+```{r}
+TSTOUT <- mutate(TSTOUT,
+                 yhranger=predict(Mranger, newdata=tst), resranger=y-yhranger)
+head(TSTOUT)
+```
+
+```{r}
+sqrt(mean(TSTOUT$resranger^2))
+```
+
+```{r}
+cor(TSTOUT$y, TSTOUT$yhranger)^2
+```
+
+```{r}
+p1 <- xyplot(y~yhranger, data=TRNOUT, type=c('g','p'), main='TRNOUT')
+p2 <- xyplot(resranger~yhranger, data=TRNOUT, main='TRNOUT')
+p3 <- xyplot(y~yhranger, data=TSTOUT, main='TSTOUT')
+p4 <- xyplot(resranger~yhranger, data=TSTOUT, main='TSTOUT')
+grid.arrange(p1,p2,p3,p4, nrow=2, ncol=2)
+```
+
+
+## xgbTree 
+* xgbTree: extreme boosting
+* [알고리즘 소개 : XGBoost](https://apple-rbox.tistory.com/6)
+
+모수    |역할(기본값)|참고
+-------|---------|------------------------------------
+**eta**|Shrinkage (default=0.3) 단계별 학습 가중치|작을수록 보수적(;작은 eta는 큰 rounds에 해당)  
+**max_depth**|Max Tree Depth (default=6)  최대 나무 깊이|[0,Inf]. 클수록 방임적 
+**colsample_bytree**|Subsample Ratio of Columns  (default=1) 나무생성시 사용할 입력변수 비율 | (0,1)
+**subsample**|Subsample Percentage   (default=1)|(0,1). 0.5면 적합자료의 반으로 나무생성
+**nrounds**|Boosting Iterations|(50,100,150, ...)
+gamma|Min Loss Reduction| held at 0. Info Gain 계산시 벌점값. 클수록 IG값을 작게 하므로 보수적 모형 생성
+min_child_weight|Minimum Sum of Instance Weight (default=1)| held at 1. 값이 클수록 보수적  
+
+
+* 참고
+   * tuneLength 지정시 eta, max_depth, colsample_bytree, subsample, nrounds를 튜닝. gamma(0), min_child_weight(1)는 고정. tuneLength=5면 2(eta)x5x2(colsample_bytree)x5x5=500. 이유는 ??
+   * library(plyr); library(dplyr) 순서로 로딩 권장 경고나옴. 
+   * tidyverse를 로딩하면 dplyr만 로딩됨. xgboost가 plyr를 쓰기 때문에 plyr가 뒤에 로딩되고 충돌
+```{r}
+modelLookup('xgbTree')
+```
+```{r}
+library(plyr); library(dplyr)
+set.seed(0205)
+xgGrid <- expand.grid(
+  eta=0.3, max_depth=6, colsample_bytree=1, subsample=1,
+  nrounds=c(10,50,100),
+  gamma=0, min_child_weight=1)
+MxgbTree <- train(RC,data=trn, method = 'xgbTree',
+                  trControl=trCtrl,
+                  tuneLength = 4)
+```
+
+```{r}
+MxgbTree
+```
+
+```{r}
+MxgbTree$bestTune
+```
+
+```{r}
+MxgbTree$finalModel
+```
+
+```{r}
+varImp(MxgbTree)
+```
+
+```{r}
+g2 <- ggplot(varImp(MxgbTree))
+MxgbTree$resample
+```
+
+```{r}
+g3 <- densityplot(MxgbTree)
+grid.arrange(g2,g3,nrow=2, ncol=2)
+```
+
+* 예측값, 잔차 저장 및 성능측도 
+```{r}
+TRNOUT <- mutate(TRNOUT,
+                 yhxgbTree=predict(MxgbTree, newdata=trn),
+                 resxgbTree=y-yhxgbTree)
+head(TRNOUT)
+```
+
+```{r}
+sqrt(mean(TRNOUT$resxgbTree^2))
+```
+
+```{r}
+cor(TRNOUT$y, TRNOUT$yhxgbTree)^2
+```
+
+```{r}
+TSTOUT <- mutate(TSTOUT,
+                 yhxgbTree=predict(MxgbTree, newdata=tst),
+                 resxgbTree=y-yhxgbTree)
+head(TSTOUT)
+```
+
+```{r}
+sqrt(mean(TSTOUT$resxgbTree^2))
+```
+
+```{r}
+cor(TSTOUT$y, TSTOUT$yhxgbTree)^2
+```
+
+# 모형평가 
+## CV결과로 성능평가: resamples 객체 생성 
+```{r}
+resamp <- resamples(list(Mlm=Mlm, Mstep=Mstep,
+                         Menet=Menet, Mglmnet=Mglmnet,
+                         Mnnet=Mnnet,
+                         MsvmRadial=MsvmRadial,
+                         Mrpart=Mrpart,
+                         Mranger=Mranger,
+                         MxgbTree=MxgbTree))
+summary(resamp)
+```
+
+```{r}
+bwplot(resamp)
+```
+
+```{r}
+splom(resamp, metric='RMSE')
+```
+
+```{r}
+dresamp <- diff(resamp, metric='RMSE')
+summary(dresamp)
+```
+## TRN/TST에서 성능평가 
+```{r}
+TRNRMSE <- 
+  TRNOUT %>% dplyr::select(starts_with('res')) %>% .^2 %>% apply(2,mean) %>% sqrt(.)
+TSTRMSE <- 
+  TSTOUT %>% dplyr::select(starts_with('res')) %>% .^2 %>% apply(2,mean) %>% sqrt(.)
+TRNMAE <- 
+  TRNOUT %>% dplyr::select(starts_with('res')) %>% abs(.) %>% apply(2,mean) %>% sqrt(.)
+TSTMAE <- 
+  TSTOUT %>% dplyr::select(starts_with('res')) %>% abs(.) %>% apply(2,mean) %>% sqrt(.)
+
+TRNRSQ <- (TRNOUT %>% dplyr::select(y, starts_with('yh')) %>% cor(.))[1,-1]
+TSTRSQ <- (TSTOUT %>% dplyr::select(y, starts_with('yh')) %>% cor(.))[1,-1]
+
+RMSEtbl <- data.frame(cbind(TRNRMSE, TSTRMSE)) %>%
+  rownames_to_column(var='MODEL') %>%
+  arrange(TSTRMSE)
+
+MAEtbl <- data.frame(cbind(TRNMAE, TSTMAE)) %>%
+  rownames_to_column(var='MODEL') %>%
+  arrange(TSTMAE)
+
+RSQtbl <- data.frame(cbind(TRNRSQ, TSTRSQ)) %>%
+  rownames_to_column(var='MODEL') %>%
+  arrange(TSTRSQ)
+
+RMSEtbl <- mutate(RMSEtbl, MODEL=substring(MODEL,4))
+MAEtbl <- mutate(MAEtbl, MODEL=substring(MODEL,4))
+RSQtbl <- mutate(RSQtbl, MODEL=substring(MODEL,3))
+
+RMSEtbl
+```
+
+```{r}
+MAEtbl
+```
+
+```{r}
+RSQtbl
+```
+
+```{r}
+ggplot(RMSEtbl, aes(x=reorder(MODEL,-TSTRMSE))) +
+  geom_point(aes(y=TSTRMSE), stat='identity', col='red')+
+  geom_point(aes(y=TRNRMSE), stat='identity', col='blue',shape=2)+
+  xlab('Model') + ylab('RMSE')+
+  coord_flip()
+```
+
+```{r}
+ggplot(MAEtbl, aes(x=reorder(MODEL,-TSTMAE))) +
+  geom_point(aes(y=TSTMAE), stat='identity', col='red')+
+  geom_point(aes(y=TRNMAE), stat='identity', col='blue',shape=2)+
+  xlab('Model') + ylab('MAE')+
+  coord_flip()
+```
+
+# 최종모형
+* TST에서 RMSE 기준: Mstep, Mnnet, Mlm, Mglmnet, Menet, Mranger, MsvmRadial, MxgbTree, Mrpart 
+```{r}
+Mglmnet$bestTune
+```
+
+```{r}
+ctrl <- trainControl(method = 'none')
+M <- train(RC, data=trn, method='glmnet',
+           trControl = ctrl,
+           tuneGrid = Mglmnet$bestTune)
+coef(M$finalModel, s=M$finalModel$lambda0pt)
+```
+
+```{r}
+yh <- predict(M, newdata=trn)
+cor(trn$ht, yh)^2
+```
+
+```{r}
+mean((trn$ht-yh)^2)
+```
+
+```{r}
+mean(abs(trn$ht-yh))
+```
+
+```{r}
+yh <- predict(M, newdata=tst)
+cor(tst$ht, yh)^2
+```
+
+```{r}
+mean(abs(tst$ht-yh))
+```
+
+```{r}
+time2 <- Sys.time()
+time2
+```
+
+```{r}
+time2-time1
+```
